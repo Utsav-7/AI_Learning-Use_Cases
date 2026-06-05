@@ -1,0 +1,258 @@
+@page "/"
+@rendermode InteractiveServer
+@using System.Text.Json
+@using System.Text.Json.Nodes
+@inject IDocumentExtractionService Extractor
+@inject IMaskingService Masking
+@inject IDocumentRepository Repository
+@inject IOllamaService Ollama
+@inject IRagService Rag
+@inject ILogger<Home> Logger
+
+<PageTitle>Smart Auto-Fill Form Assistant</PageTitle>
+
+<div class="page-wrap">
+    <header class="hero">
+        <h1>Smart Auto-Fill Form Assistant</h1>
+        <p>Upload a document (PDF or image) and get the extracted data as JSON.</p>
+    </header>
+
+    <section class="card">
+        <div class="upload-row">
+            <label>
+                Document type
+                <select @bind="_category" disabled="@_busy">
+                    @foreach (var s in FormCatalog.Schemas)
+                    {
+                        <option value="@s.Category">@s.Category</option>
+                    }
+                </select>
+            </label>
+
+            <label class="file-label">
+                Choose file
+                <InputFile OnChange="OnFileSelected" accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp" disabled="@_busy" />
+            </label>
+
+            <button class="btn-primary" @onclick="Analyze" disabled="@(_busy || _file is null)">
+                @(_busy ? "Processing…" : "Upload")
+            </button>
+        </div>
+        @if (_file is not null)
+        {
+            <p class="file-name">Selected: <strong>@_file.Name</strong> (@(_file.Size / 1024) KB)</p>
+        }
+        @if (!string.IsNullOrEmpty(_error))
+        {
+            <p class="error">@_error</p>
+        }
+    </section>
+
+    @if (!string.IsNullOrEmpty(_json) || !string.IsNullOrEmpty(_previewDataUrl))
+    {
+        <div class="result-grid">
+            @if (!string.IsNullOrEmpty(_previewDataUrl))
+            {
+                <section class="card">
+                    <h2>Uploaded Document</h2>
+                    <div class="preview">
+                        @if (_isImage)
+                        {
+                            <img src="@_previewDataUrl" alt="Uploaded document" />
+                        }
+                        else
+                        {
+                            <iframe src="@_previewDataUrl" title="Uploaded document"></iframe>
+                        }
+                    </div>
+                </section>
+            }
+
+            @if (!string.IsNullOrEmpty(_json))
+            {
+                <section class="card">
+                    <h2>JSON</h2>
+                    <pre class="json">@_json</pre>
+                </section>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private string _category = FormCatalog.Schemas.First().Category;
+    private IBrowserFile? _file;
+    private bool _busy;
+    private string? _error;
+    private string? _json;
+    private string? _previewDataUrl;
+    private bool _isImage;
+
+    private const long MaxBytes = 20 * 1024 * 1024; // 20 MB
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        ResetState();
+        _file = e.File;
+    }
+
+    private void ResetState()
+    {
+        _error = null;
+        _json = null;
+        _previewDataUrl = null;
+        _isImage = false;
+    }
+
+    private async Task Analyze()
+    {
+        if (_file is null) return;
+        _busy = true;
+        ResetState();
+
+        try
+        {
+            // Read the file once; reuse the bytes for extraction and for the preview.
+            byte[] bytes;
+            await using (var stream = _file.OpenReadStream(MaxBytes))
+            using (var ms = new MemoryStream())
+            {
+                await stream.CopyToAsync(ms);
+                bytes = ms.ToArray();
+            }
+
+            // Document preview (image inline, PDF in an iframe).
+            var contentType = string.IsNullOrWhiteSpace(_file.ContentType)
+                ? GuessContentType(_file.Name)
+                : _file.ContentType;
+            _isImage = contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+            _previewDataUrl = $"data:{contentType};base64,{Convert.ToBase64String(bytes)}";
+
+            // OCR + field extraction.
+            using var extractStream = new MemoryStream(bytes);
+            var result = await Extractor.ExtractAsync(extractStream, _file.Name, _category);
+
+            // Mask PII before anything reaches the LLM.
+            var mask = Masking.Mask(result.RawText);
+
+            // RAG: retrieve similar past examples to guide the LLM.
+            var examples = await Rag.GetExamplesBlockAsync(_category, mask.MaskedText, k: 4);
+
+            // Ask the LLM for a nested JSON object following the category template.
+            var template = JsonTemplates.Get(_category);
+            var structuredMasked = await Ollama.ExtractStructuredAsync(mask.MaskedText, template, examples);
+            var structuredJson = structuredMasked is null ? null : Masking.Unmask(structuredMasked, mask.Map);
+
+            // Persist extraction + masked text.
+            try { await Repository.SaveAsync(result, mask.MaskedText, createdBy: "demo-user"); }
+            catch (Exception dbEx) { Logger.LogWarning(dbEx, "Could not persist to database"); }
+
+            // Feedback loop: save confirmed mappings (masked) back into the RAG knowledge base.
+            await Rag.SaveExamplesAsync(_category, result.Fields, Masking);
+
+            _json = BuildJson(structuredJson, result);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Processing failed");
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    // Field keys that should be emitted as a JSON array instead of a string.
+    private static readonly HashSet<string> ListFields = new(StringComparer.OrdinalIgnoreCase) { "Skills" };
+
+    // Friendly JSON property names for known fields.
+    private static readonly Dictionary<string, string> PropertyNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["FullName"] = "name",
+        ["DocumentNumber"] = "documentNumber",
+        ["DateOfBirth"] = "dateOfBirth",
+        ["DateOfExpiration"] = "expiryDate",
+        ["InvoiceId"] = "invoiceNumber",
+        ["InvoiceTotal"] = "total",
+    };
+
+    private static readonly JsonSerializerOptions JsonOut = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    /// <summary>
+    /// Merge the LLM's nested JSON with the Azure/heuristic flat fields (so nothing is lost)
+    /// and append the full OCR text. Produces the nested object shown in the UI.
+    /// </summary>
+    private static string BuildJson(string? llmJson, ExtractionResult result)
+    {
+        JsonObject root;
+        try
+        {
+            root = (string.IsNullOrWhiteSpace(llmJson) ? null : JsonNode.Parse(llmJson) as JsonObject)
+                   ?? new JsonObject();
+        }
+        catch
+        {
+            root = new JsonObject(); // LLM output unparseable — fall back to extracted fields only
+        }
+
+        // Fill in any field the LLM left null/missing with Azure/heuristic values.
+        foreach (var f in result.Fields)
+        {
+            if (string.IsNullOrWhiteSpace(f.Value)) continue;
+
+            var prop = PropertyNames.TryGetValue(f.Key, out var mapped)
+                ? mapped
+                : f.Key.StartsWith("kvp_", StringComparison.OrdinalIgnoreCase)
+                    ? ToCamelCase(Sanitize(f.DisplayName))
+                    : ToCamelCase(f.Key);
+            if (string.IsNullOrWhiteSpace(prop)) continue;
+
+            var present = root.TryGetPropertyValue(prop, out var existing) && existing is not null;
+            if (present) continue; // keep the LLM's richer value
+
+            if (ListFields.Contains(f.Key))
+                root[prop] = new JsonArray(SplitList(f.Value).Select(s => (JsonNode)s!).ToArray());
+            else
+                root[prop] = f.Value;
+        }
+
+        return root.ToJsonString(JsonOut);
+    }
+
+    /// <summary>Turn a detected key label into a safe-ish identifier for a JSON property.</summary>
+    private static string Sanitize(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+        var chars = s.Trim().Where(c => char.IsLetterOrDigit(c) || c == ' ').ToArray();
+        var words = new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0) return string.Empty;
+        return words[0].ToLowerInvariant() +
+               string.Concat(words.Skip(1).Select(w => char.ToUpperInvariant(w[0]) + w[1..].ToLowerInvariant()));
+    }
+
+    private static string[] SplitList(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? Array.Empty<string>()
+            : value.Split(new[] { ',', ';', '|', '•', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                   .Distinct()
+                   .ToArray();
+
+    private static string ToCamelCase(string s) =>
+        string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s[1..];
+
+    private static string GuessContentType(string fileName) =>
+        Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".pdf" => "application/pdf",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".tiff" or ".tif" => "image/tiff",
+            ".bmp" => "image/bmp",
+            _ => "application/octet-stream"
+        };
+}

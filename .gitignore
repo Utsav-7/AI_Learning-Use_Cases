@@ -1,0 +1,89 @@
+# ---------------------------------------------
+# .NET / ASP.NET Core (SmartAutoFill Blazor app)
+# ---------------------------------------------
+
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+bld/
+[Oo]ut/
+[Pp]ublish/
+publish/
+*.dll
+*.exe
+*.pdb
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# ---------------------------------------------
+# Secrets & local config — DO NOT COMMIT
+# ---------------------------------------------
+# User Secrets are stored outside the repo, but ignore any local overrides:
+appsettings.*.local.json
+appsettings.Local.json
+secrets.json
+*.user
+*.pfx
+*.key
+.env
+.env.*
+
+# ---------------------------------------------
+# Visual Studio / VS Code / Rider
+# ---------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.suo
+*.userprefs
+*.DotSettings.user
+_ReSharper*/
+*.swp
+
+# ---------------------------------------------
+# Test / coverage / logs
+# ---------------------------------------------
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+*.log
+
+# ---------------------------------------------
+# NuGet
+# ---------------------------------------------
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+.nuget/
+
+# ---------------------------------------------
+# OS files
+# ---------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------------------------------------------
+# App-specific
+# ---------------------------------------------
+# Uploaded documents / temp files, if you ever persist them to disk
+uploads/
+temp/
+*.tmp
+secret.txt
+*.txt
+Implementation-Plan.md
