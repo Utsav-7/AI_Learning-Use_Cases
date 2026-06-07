@@ -87,3 +87,4 @@ temp/
 secret.txt
 *.txt
 Implementation-Plan.md
+.claude

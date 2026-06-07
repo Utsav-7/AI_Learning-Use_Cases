@@ -4,9 +4,7 @@
 @using System.Text.Json.Nodes
 @inject IDocumentExtractionService Extractor
 @inject IMaskingService Masking
-@inject IDocumentRepository Repository
-@inject IOllamaService Ollama
-@inject IRagService Rag
+@inject ILlmProviderFactory LlmProviders
 @inject ILogger<Home> Logger
 
 <PageTitle>Smart Auto-Fill Form Assistant</PageTitle>
@@ -20,11 +18,11 @@
     <section class="card">
         <div class="upload-row">
             <label>
-                Document type
-                <select @bind="_category" disabled="@_busy">
-                    @foreach (var s in FormCatalog.Schemas)
+                AI model
+                <select @bind="_provider" disabled="@_busy">
+                    @foreach (var p in LlmProviders.AvailableProviders)
                     {
-                        <option value="@s.Category">@s.Category</option>
+                        <option value="@p">@p</option>
                     }
                 </select>
             </label>
@@ -80,15 +78,20 @@
 </div>
 
 @code {
-    private string _category = FormCatalog.Schemas.First().Category;
+    // OCR with the universal layout model; the LLM auto-detects the document type.
+    private const string OcrCategory = "General Document (Layout)";
+
     private IBrowserFile? _file;
     private bool _busy;
     private string? _error;
     private string? _json;
     private string? _previewDataUrl;
     private bool _isImage;
+    private string _provider = "";
 
     private const long MaxBytes = 20 * 1024 * 1024; // 20 MB
+
+    protected override void OnInitialized() => _provider = LlmProviders.DefaultProvider;
 
     private void OnFileSelected(InputFileChangeEventArgs e)
     {
@@ -128,27 +131,17 @@
             _isImage = contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
             _previewDataUrl = $"data:{contentType};base64,{Convert.ToBase64String(bytes)}";
 
-            // OCR + field extraction.
+            // OCR with the universal layout model (works for any document).
             using var extractStream = new MemoryStream(bytes);
-            var result = await Extractor.ExtractAsync(extractStream, _file.Name, _category);
+            var result = await Extractor.ExtractAsync(extractStream, _file.Name, OcrCategory);
 
             // Mask PII before anything reaches the LLM.
             var mask = Masking.Mask(result.RawText);
 
-            // RAG: retrieve similar past examples to guide the LLM.
-            var examples = await Rag.GetExamplesBlockAsync(_category, mask.MaskedText, k: 4);
-
-            // Ask the LLM for a nested JSON object following the category template.
-            var template = JsonTemplates.Get(_category);
-            var structuredMasked = await Ollama.ExtractStructuredAsync(mask.MaskedText, template, examples);
+            // Selected LLM provider auto-detects the document type and extracts nested JSON.
+            var provider = LlmProviders.Get(_provider);
+            var structuredMasked = await provider.ClassifyAndExtractAsync(mask.MaskedText, JsonTemplates.AutoInstruction());
             var structuredJson = structuredMasked is null ? null : Masking.Unmask(structuredMasked, mask.Map);
-
-            // Persist extraction + masked text.
-            try { await Repository.SaveAsync(result, mask.MaskedText, createdBy: "demo-user"); }
-            catch (Exception dbEx) { Logger.LogWarning(dbEx, "Could not persist to database"); }
-
-            // Feedback loop: save confirmed mappings (masked) back into the RAG knowledge base.
-            await Rag.SaveExamplesAsync(_category, result.Fields, Masking);
 
             _json = BuildJson(structuredJson, result);
         }
@@ -163,20 +156,6 @@
         }
     }
 
-    // Field keys that should be emitted as a JSON array instead of a string.
-    private static readonly HashSet<string> ListFields = new(StringComparer.OrdinalIgnoreCase) { "Skills" };
-
-    // Friendly JSON property names for known fields.
-    private static readonly Dictionary<string, string> PropertyNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["FullName"] = "name",
-        ["DocumentNumber"] = "documentNumber",
-        ["DateOfBirth"] = "dateOfBirth",
-        ["DateOfExpiration"] = "expiryDate",
-        ["InvoiceId"] = "invoiceNumber",
-        ["InvoiceTotal"] = "total",
-    };
-
     private static readonly JsonSerializerOptions JsonOut = new()
     {
         WriteIndented = true,
@@ -184,66 +163,39 @@
     };
 
     /// <summary>
-    /// Merge the LLM's nested JSON with the Azure/heuristic flat fields (so nothing is lost)
-    /// and append the full OCR text. Produces the nested object shown in the UI.
+    /// Pretty-print the LLM's auto-detected nested JSON. If the LLM was unavailable or
+    /// returned invalid JSON, fall back to the raw OCR key-value pairs so nothing is lost.
     /// </summary>
     private static string BuildJson(string? llmJson, ExtractionResult result)
     {
-        JsonObject root;
-        try
+        if (!string.IsNullOrWhiteSpace(llmJson))
         {
-            root = (string.IsNullOrWhiteSpace(llmJson) ? null : JsonNode.Parse(llmJson) as JsonObject)
-                   ?? new JsonObject();
-        }
-        catch
-        {
-            root = new JsonObject(); // LLM output unparseable — fall back to extracted fields only
-        }
-
-        // Fill in any field the LLM left null/missing with Azure/heuristic values.
-        foreach (var f in result.Fields)
-        {
-            if (string.IsNullOrWhiteSpace(f.Value)) continue;
-
-            var prop = PropertyNames.TryGetValue(f.Key, out var mapped)
-                ? mapped
-                : f.Key.StartsWith("kvp_", StringComparison.OrdinalIgnoreCase)
-                    ? ToCamelCase(Sanitize(f.DisplayName))
-                    : ToCamelCase(f.Key);
-            if (string.IsNullOrWhiteSpace(prop)) continue;
-
-            var present = root.TryGetPropertyValue(prop, out var existing) && existing is not null;
-            if (present) continue; // keep the LLM's richer value
-
-            if (ListFields.Contains(f.Key))
-                root[prop] = new JsonArray(SplitList(f.Value).Select(s => (JsonNode)s!).ToArray());
-            else
-                root[prop] = f.Value;
+            try
+            {
+                var node = JsonNode.Parse(llmJson);
+                if (node is not null) return node.ToJsonString(JsonOut);
+            }
+            catch { /* fall through to the OCR fallback */ }
         }
 
-        return root.ToJsonString(JsonOut);
+        // Fallback (AI model unavailable): emit whatever OCR detected, with Azure's confidence.
+        var fallback = new JsonObject
+        {
+            ["documentType"] = "unknown",
+            ["data"] = new JsonObject
+            {
+                ["fields"] = new JsonArray(result.Fields
+                    .Where(f => !string.IsNullOrWhiteSpace(f.Value))
+                    .Select(f => (JsonNode)new JsonObject
+                    {
+                        ["label"] = f.DisplayName,
+                        ["value"] = f.Value,
+                        ["confidence"] = Math.Round(f.Confidence, 2)
+                    }).ToArray())
+            }
+        };
+        return fallback.ToJsonString(JsonOut);
     }
-
-    /// <summary>Turn a detected key label into a safe-ish identifier for a JSON property.</summary>
-    private static string Sanitize(string s)
-    {
-        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
-        var chars = s.Trim().Where(c => char.IsLetterOrDigit(c) || c == ' ').ToArray();
-        var words = new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length == 0) return string.Empty;
-        return words[0].ToLowerInvariant() +
-               string.Concat(words.Skip(1).Select(w => char.ToUpperInvariant(w[0]) + w[1..].ToLowerInvariant()));
-    }
-
-    private static string[] SplitList(string? value) =>
-        string.IsNullOrWhiteSpace(value)
-            ? Array.Empty<string>()
-            : value.Split(new[] { ',', ';', '|', '•', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                   .Distinct()
-                   .ToArray();
-
-    private static string ToCamelCase(string s) =>
-        string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s[1..];
 
     private static string GuessContentType(string fileName) =>
         Path.GetExtension(fileName).ToLowerInvariant() switch

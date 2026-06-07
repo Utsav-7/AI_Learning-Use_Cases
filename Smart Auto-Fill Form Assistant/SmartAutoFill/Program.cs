@@ -1,6 +1,4 @@
-using Microsoft.EntityFrameworkCore;
 using SmartAutoFill.Components;
-using SmartAutoFill.Data;
 using SmartAutoFill.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,16 +7,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// SQL Server persistence (EF Core).
-builder.Services.AddDbContext<AppDbContext>(opt =>
-    opt.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
-
 // Document extraction (Azure Document Intelligence).
 builder.Services.AddScoped<IDocumentExtractionService, AzureDocumentExtractionService>();
 
-// PII masking + persistence.
+// PII masking.
 builder.Services.AddSingleton<IMaskingService, RegexMaskingService>();
-builder.Services.AddScoped<IDocumentRepository, DocumentRepository>();
 
 builder.Services.AddHttpClient("ollama", c =>
 {
@@ -27,9 +20,17 @@ builder.Services.AddHttpClient("ollama", c =>
     // the default 100s. Allow plenty of headroom.
     c.Timeout = TimeSpan.FromMinutes(10);
 });
-builder.Services.AddScoped<IOllamaService, OllamaService>();
-builder.Services.AddScoped<IEmbeddingService, OllamaEmbeddingService>();
-builder.Services.AddScoped<IRagService, RagService>();
+builder.Services.AddHttpClient("openai", c =>
+{
+    c.BaseAddress = new Uri("https://api.openai.com");
+    c.Timeout = TimeSpan.FromMinutes(2);
+});
+
+// LLM providers (switchable at runtime via the UI selector).
+builder.Services.AddScoped<ILlmProvider, OllamaProvider>();
+builder.Services.AddScoped<ILlmProvider, ClaudeProvider>();
+builder.Services.AddScoped<ILlmProvider, OpenAiProvider>();
+builder.Services.AddScoped<ILlmProviderFactory, LlmProviderFactory>();
 
 // Allow larger uploads over the SignalR circuit (PDFs/scans can be several MB).
 builder.Services.Configure<Microsoft.AspNetCore.SignalR.HubOptions>(o =>

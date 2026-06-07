@@ -1,17 +1,19 @@
 # SmartAutoFill — Blazor App
 
-A simple Blazor Web App (Server interactivity, .NET 9) implementing the document → form pipeline
-from `../Implementation-Plan.md`. It covers requirements 1–8: upload → OCR/extract (Azure Document
-Intelligence) → map to a predefined form → highlight missing fields → review/edit → confidence
-scores → final JSON.
+A simple Blazor Web App (Server interactivity, .NET 9). **No database, no storage** — a straight
+pipeline that returns JSON:
 
-**Implemented now:** Azure extraction + review/JSON + **PII masking** + **SQL Server persistence**.
-**Not yet wired:** Ollama mapping/normalization and RAG against the `MappingExamples` table.
+```
+Upload (PDF/image)  →  Azure Document Intelligence (OCR)  →  PII masking
+                    →  AI model (Ollama / Claude / GPT)   →  JSON with value + confidence
+```
 
-## 1. Configure your Azure Document Intelligence resource
+Nothing is persisted; each upload is processed in-memory and the result is shown on screen.
 
-After you create the resource in the Azure portal, copy its **Endpoint** and a **Key**.
-Don't commit the key — use **user-secrets** (recommended) or edit `appsettings.json`.
+## 1. Configure Azure Document Intelligence
+
+After creating the resource in the Azure portal, copy its **Endpoint** and a **Key**.
+Don't commit keys — use **user-secrets** (recommended) or edit `appsettings.json`.
 
 ```powershell
 # from the SmartAutoFill project folder
@@ -20,21 +22,25 @@ dotnet user-secrets set "AzureDocumentIntelligence:Endpoint" "https://YOUR-RESOU
 dotnet user-secrets set "AzureDocumentIntelligence:ApiKey"   "YOUR_KEY_HERE"
 ```
 
-(Or just replace the placeholders in `appsettings.json`.)
+## 2. Configure the AI model provider(s)
 
-## 1b. Database (SQL Server)
-
-The app persists to SQL Server via EF Core. The connection string in `appsettings.json` points at
-`localhost\SQLEXPRESS` / database `AutoFillFormDb`. The database + tables have already been created
-via migration. To re-create on another machine:
+Pick the provider from the **AI model** dropdown in the UI. Defaults to local Ollama.
 
 ```powershell
-dotnet ef database update
+# Local Ollama (no key) — just have it running with a model pulled:
+ollama pull llama3.1:8b
+
+# Claude (optional):
+dotnet user-secrets set "Claude:ApiKey" "sk-ant-..."
+
+# GPT / OpenAI (optional):
+dotnet user-secrets set "OpenAI:ApiKey" "sk-..."
 ```
 
-Tables: `Documents`, `ExtractedFields`, `AuditLogs` (+ `__EFMigrationsHistory`).
+Model IDs / default provider live in `appsettings.json` (`Ollama:ChatModel`, `Claude:Model`,
+`OpenAI:Model`, `Llm:Provider`).
 
-## 2. Run
+## 3. Run
 
 ```powershell
 dotnet run
@@ -42,36 +48,26 @@ dotnet run
 
 Open the HTTPS URL shown (e.g. https://localhost:7061).
 
-## 3. Use
+## 4. Use
 
-1. Pick a **Document type** — Passport/ID, Invoice, or General (Layout).
-2. Choose a PDF/image and click **Extract**.
-3. Review the form: each field shows a **confidence badge**; missing fields are highlighted; 🔒 marks PII.
-4. Edit any value (marked *edited*, confidence → 100%).
-5. Click **Generate Final JSON**.
+1. Pick the **AI model** (Ollama / Claude / GPT).
+2. Choose a PDF/image and click **Upload**.
+3. The page shows the document preview and the extracted **JSON** — the model auto-detects the
+   document type and returns each field as `{ "value": ..., "confidence": 0-1 }`.
 
 ## Project map
 
 | Path | Purpose |
 |---|---|
-| `Models/ExtractedField.cs` | One form field + confidence + missing/PII flags |
-| `Models/FormSchema.cs` | Predefined forms per doc type + Azure model mapping |
-| `Models/ExtractionResult.cs` | Result returned to the UI |
-| `Services/AzureDocumentExtractionService.cs` | Calls Azure DI, maps fields into the schema |
-| `Services/RegexMaskingService.cs` | Type-tagged, reversible PII masking (email/SSN/PAN/Aadhaar/card/passport/DOB/phone) |
-| `Services/DocumentRepository.cs` | Saves documents/fields/audit to SQL Server (EF Core) |
-| `Data/AppDbContext.cs`, `Data/Entities.cs` | EF Core context + entities |
-| `Components/Pages/Home.razor` | Upload → review/edit → JSON page |
+| `Services/AzureDocumentExtractionService.cs` | Calls Azure DI for OCR text |
+| `Services/RegexMaskingService.cs` | Type-tagged, reversible PII masking before the LLM call |
+| `Services/ILlmProvider.cs` + `LlmProviderFactory.cs` | Provider abstraction + runtime selection |
+| `Services/OllamaProvider.cs` / `ClaudeProvider.cs` / `OpenAiProvider.cs` | The three AI backends |
+| `Models/JsonTemplates.cs` | Per-type target JSON shape (value + confidence) the model fills |
+| `Components/Pages/Home.razor` | Upload → preview + JSON page |
 
-## Supported document types
+## How confidence works
 
-| Type | Azure model | Fields |
-|---|---|---|
-| Passport / ID | `prebuilt-idDocument` | name, document no., DOB, expiry, sex, nationality, address |
-| Invoice | `prebuilt-invoice` | vendor, customer, invoice no., dates, totals, tax |
-| General (Layout) | `prebuilt-layout` | detected key-value pairs + raw text |
-
-## Next steps (from the plan)
-
-- **Ollama** mapping/normalization (send the *masked* text to the local model).
-- **RAG** against a SQL `MappingExamples` table + the feedback loop on user edits.
+OCR (layout) gives plain text, so per-field confidence comes from the **AI model's own
+self-assessment** (1.0 = explicit in the document, lower = inferred/ambiguous). If the model is
+unavailable, the app falls back to Azure's OCR key-value pairs and uses Azure's confidence.
