@@ -51,7 +51,7 @@ public class AzureDocumentExtractionService : IDocumentExtractionService
         {
             Category = category,
             FileName = fileName,
-            RawText = result.Content ?? string.Empty
+            RawText = CleanOcr(result.Content)
         };
 
         if (schema.HeuristicExtraction)
@@ -62,6 +62,18 @@ public class AzureDocumentExtractionService : IDocumentExtractionService
             MapKeyValuePairs(result, extraction);
 
         return extraction;
+    }
+
+    /// <summary>Remove Azure layout checkbox markers (":selected:" / ":unselected:") and tidy whitespace.</summary>
+    private static string CleanOcr(string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return string.Empty;
+        var cleaned = content
+            .Replace(":selected:", " ", StringComparison.OrdinalIgnoreCase)
+            .Replace(":unselected:", " ", StringComparison.OrdinalIgnoreCase);
+        // Collapse runs of spaces/tabs introduced by the removals (keep newlines).
+        cleaned = Regex.Replace(cleaned, "[ \t]{2,}", " ");
+        return cleaned;
     }
 
     /// <summary>

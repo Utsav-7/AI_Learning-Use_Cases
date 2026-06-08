@@ -38,7 +38,7 @@ public class OllamaProvider : ILlmProvider
             options = new { temperature = 0.1, num_predict = 4096, num_ctx = 8192 },
             messages = new[]
             {
-                new { role = "system", content = "You convert documents into structured JSON. Output valid JSON only." },
+                new { role = "system", content = "You are an information-extraction assistant. Read and understand the document, reason about what each piece of text means, and extract clean, normalised values into the requested JSON structure. Interpret — do not copy raw text verbatim. Output valid JSON only." },
                 new { role = "user", content = prompt }
             }
         };

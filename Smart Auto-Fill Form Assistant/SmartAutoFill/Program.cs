@@ -20,17 +20,8 @@ builder.Services.AddHttpClient("ollama", c =>
     // the default 100s. Allow plenty of headroom.
     c.Timeout = TimeSpan.FromMinutes(10);
 });
-builder.Services.AddHttpClient("openai", c =>
-{
-    c.BaseAddress = new Uri("https://api.openai.com");
-    c.Timeout = TimeSpan.FromMinutes(2);
-});
-
-// LLM providers (switchable at runtime via the UI selector).
+// AI model: local Ollama.
 builder.Services.AddScoped<ILlmProvider, OllamaProvider>();
-builder.Services.AddScoped<ILlmProvider, ClaudeProvider>();
-builder.Services.AddScoped<ILlmProvider, OpenAiProvider>();
-builder.Services.AddScoped<ILlmProviderFactory, LlmProviderFactory>();
 
 // Allow larger uploads over the SignalR circuit (PDFs/scans can be several MB).
 builder.Services.Configure<Microsoft.AspNetCore.SignalR.HubOptions>(o =>
