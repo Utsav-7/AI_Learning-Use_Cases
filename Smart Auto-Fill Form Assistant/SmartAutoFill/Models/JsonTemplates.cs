@@ -29,7 +29,16 @@ public static class JsonTemplates
           "certifications": [],
           "languages": [
             { "language": null, "proficiency": null }
-          ]
+          ],
+          "confidenceScores": {
+            "name": 0.0,
+            "email": 0.0,
+            "phone": 0.0,
+            "skills": 0.0,
+            "experience": 0.0,
+            "projects": 0.0,
+            "education": 0.0
+          }
         }
         """,
 
@@ -127,7 +136,9 @@ public static class JsonTemplates
         "    technologies → string[] parsed from the segment BETWEEN the first and last ' | '.\n" +
         "    description  → the body text below the title line.\n" +
         "    Drop any trailing '| Code', '| Link', '| GitHub' labels entirely.\n" +
-        "- languages: one entry per language with its proficiency (e.g. Native, Fluent, B2).\n\n" +
+        "- languages: one entry per language with its proficiency (e.g. Native, Fluent, B2).\n" +
+        "- confidenceScores: a 0.0-1.0 certainty for each listed top-level field (name, email, phone, " +
+        "skills, experience, projects, education) reflecting how sure you are of that field's extraction.\n\n" +
 
         "PASSPORT RULES (when documentType = \"passport\"):\n" +
         "- mrz: the two machine-readable lines at the bottom (the long strings full of '<'). " +

@@ -20,8 +20,16 @@ builder.Services.AddHttpClient("ollama", c =>
     // the default 100s. Allow plenty of headroom.
     c.Timeout = TimeSpan.FromMinutes(10);
 });
-// AI model: local Ollama.
+builder.Services.AddHttpClient("gemini", c =>
+{
+    c.BaseAddress = new Uri("https://generativelanguage.googleapis.com");
+    c.Timeout = TimeSpan.FromMinutes(2);
+});
+
+// AI models (switchable at runtime via the UI selector).
 builder.Services.AddScoped<ILlmProvider, OllamaProvider>();
+builder.Services.AddScoped<ILlmProvider, GeminiProvider>();
+builder.Services.AddScoped<ILlmProviderFactory, LlmProviderFactory>();
 
 // Allow larger uploads over the SignalR circuit (PDFs/scans can be several MB).
 builder.Services.Configure<Microsoft.AspNetCore.SignalR.HubOptions>(o =>

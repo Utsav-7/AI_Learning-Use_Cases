@@ -1,8 +1,11 @@
 namespace SmartAutoFill.Services;
 
+/// <summary>Outcome of an extraction call: the JSON, and/or a user-facing error message.</summary>
+public record LlmResult(string? Json, string? Error = null);
+
 /// <summary>
-/// Provider-agnostic LLM contract. Implementations: local Ollama, Claude (Anthropic),
-/// GPT (OpenAI). The app selects one at runtime via <see cref="ILlmProviderFactory"/>.
+/// Provider-agnostic LLM contract. Implementations: local Ollama, Gemini (Google).
+/// The app selects one at runtime via <see cref="ILlmProviderFactory"/>.
 /// </summary>
 public interface ILlmProvider
 {
@@ -14,8 +17,7 @@ public interface ILlmProvider
 
     /// <summary>
     /// Classify the (masked) document and extract a nested JSON object following the
-    /// given instruction. Returns raw JSON (may contain {{PII}} placeholders), or null
-    /// if the provider is unavailable.
+    /// given instruction. On failure, returns Json=null with a user-facing Error message.
     /// </summary>
-    Task<string?> ClassifyAndExtractAsync(string maskedText, string instruction, CancellationToken ct = default);
+    Task<LlmResult> ClassifyAndExtractAsync(string maskedText, string instruction, CancellationToken ct = default);
 }

@@ -5,7 +5,7 @@
 @using System.Text.RegularExpressions
 @inject IDocumentExtractionService Extractor
 @inject IMaskingService Masking
-@inject ILlmProvider Llm
+@inject ILlmProviderFactory LlmProviders
 @inject ILogger<Home> Logger
 
 <PageTitle>Smart Auto-Fill Form Assistant</PageTitle>
@@ -16,8 +16,26 @@
         <p>Upload a document (PDF or image) and get the extracted data as JSON.</p>
     </header>
 
+    @if (_toast is not null)
+    {
+        <div class="toast toast-@_toast.Kind">
+            <span>@_toast.Message</span>
+            <button class="toast-close" @onclick="() => _toast = null">×</button>
+        </div>
+    }
+
     <section class="card">
         <div class="upload-row">
+            <label>
+                AI model
+                <select @bind="_provider" disabled="@_busy">
+                    @foreach (var p in LlmProviders.AvailableProviders)
+                    {
+                        <option value="@p">@p</option>
+                    }
+                </select>
+            </label>
+
             <label class="file-label">
                 Choose file
                 <InputFile OnChange="OnFileSelected" accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp" disabled="@_busy" />
@@ -60,8 +78,27 @@
             @if (!string.IsNullOrEmpty(_json))
             {
                 <section class="card">
-                    <h2>JSON</h2>
-                    <pre class="json">@_json</pre>
+                    <div class="result-header">
+                        <h2>Extracted Data</h2>
+                        @if (_docType is not null)
+                        {
+                            <span class="doc-badge">@_docType</span>
+                        }
+                    </div>
+
+                    @if (_dataNode is not null)
+                    {
+                        <JsonView Node="_dataNode" />
+                    }
+                    else if (_resultNode is not null)
+                    {
+                        <JsonView Node="_resultNode" />
+                    }
+
+                    <details class="raw">
+                        <summary>Raw JSON</summary>
+                        <pre class="json">@_json</pre>
+                    </details>
                 </section>
             }
         </div>
@@ -76,14 +113,36 @@
     private bool _busy;
     private string? _error;
     private string? _json;
+    private JsonNode? _resultNode;
+    private JsonNode? _dataNode;
+    private string? _docType;
     private string? _previewDataUrl;
     private bool _isImage;
+    private string _provider = "";
+    private Toast? _toast;
 
     private const long MaxBytes = 20 * 1024 * 1024; // 20 MB
+
+    protected override void OnInitialized() => _provider = LlmProviders.DefaultProvider;
+
+    private record Toast(string Message, string Kind); // Kind: success | warning | error
+
+    private void ShowToast(string message, string kind)
+    {
+        _toast = new Toast(message, kind);
+        // Auto-dismiss after 6 seconds.
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(6000);
+            _toast = null;
+            await InvokeAsync(StateHasChanged);
+        });
+    }
 
     private void OnFileSelected(InputFileChangeEventArgs e)
     {
         ResetState();
+        _toast = null;
         _file = e.File;
     }
 
@@ -91,6 +150,9 @@
     {
         _error = null;
         _json = null;
+        _resultNode = null;
+        _dataNode = null;
+        _docType = null;
         _previewDataUrl = null;
         _isImage = false;
     }
@@ -126,16 +188,36 @@
             // Mask PII before anything reaches the LLM.
             var mask = Masking.Mask(result.RawText);
 
-            // Ollama auto-detects the document type and extracts the nested JSON.
-            var structuredMasked = await Llm.ClassifyAndExtractAsync(mask.MaskedText, JsonTemplates.AutoInstruction());
-            var structuredJson = structuredMasked is null ? null : Masking.Unmask(structuredMasked, mask.Map);
+            // Selected AI model auto-detects the document type and extracts the nested JSON.
+            var provider = LlmProviders.Get(_provider);
+            var llm = await provider.ClassifyAndExtractAsync(mask.MaskedText, JsonTemplates.AutoInstruction());
+            var structuredJson = llm.Json is null ? null : Masking.Unmask(llm.Json, mask.Map);
 
             _json = BuildJson(structuredJson, result);
+
+            // Parse for the formatted view; split documentType/data for nicer rendering.
+            try
+            {
+                _resultNode = JsonNode.Parse(_json);
+                if (_resultNode is JsonObject root)
+                {
+                    _docType = root.TryGetPropertyValue("documentType", out var dt) ? dt?.ToString() : null;
+                    _dataNode = root.TryGetPropertyValue("data", out var d) ? d : null;
+                }
+            }
+            catch { _resultNode = null; }
+
+            // Toast: success when the AI model produced the result; warning when it failed and we fell back to OCR.
+            if (llm.Error is not null)
+                ShowToast($"{provider.Name}: {llm.Error} Showing OCR fallback.", "warning");
+            else
+                ShowToast($"Extracted successfully with {provider.Name}.", "success");
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Processing failed");
             _error = ex.Message;
+            ShowToast($"Processing failed: {ex.Message}", "error");
         }
         finally
         {

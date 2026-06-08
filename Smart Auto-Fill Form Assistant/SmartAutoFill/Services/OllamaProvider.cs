@@ -20,9 +20,9 @@ public class OllamaProvider : ILlmProvider
         _logger = logger;
     }
 
-    public async Task<string?> ClassifyAndExtractAsync(string maskedText, string instruction, CancellationToken ct = default)
+    public async Task<LlmResult> ClassifyAndExtractAsync(string maskedText, string instruction, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(maskedText)) return null;
+        if (string.IsNullOrWhiteSpace(maskedText)) return new LlmResult(null);
 
         var prompt =
             instruction + "\n\n" +
@@ -46,15 +46,20 @@ public class OllamaProvider : ILlmProvider
         try
         {
             using var resp = await _http.PostAsJsonAsync("/api/chat", body, ct);
-            resp.EnsureSuccessStatusCode();
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Ollama returned {Status}", (int)resp.StatusCode);
+                return new LlmResult(null, $"Ollama returned HTTP {(int)resp.StatusCode}. Is it running?");
+            }
 
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-            return doc.RootElement.GetProperty("message").GetProperty("content").GetString();
+            var content = doc.RootElement.GetProperty("message").GetProperty("content").GetString();
+            return new LlmResult(content);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Ollama extraction unavailable; skipping LLM step.");
-            return null;
+            return new LlmResult(null, $"Ollama unavailable: {ex.Message}");
         }
     }
 }
