@@ -78,27 +78,8 @@
             @if (!string.IsNullOrEmpty(_json))
             {
                 <section class="card">
-                    <div class="result-header">
-                        <h2>Extracted Data</h2>
-                        @if (_docType is not null)
-                        {
-                            <span class="doc-badge">@_docType</span>
-                        }
-                    </div>
-
-                    @if (_dataNode is not null)
-                    {
-                        <JsonView Node="_dataNode" />
-                    }
-                    else if (_resultNode is not null)
-                    {
-                        <JsonView Node="_resultNode" />
-                    }
-
-                    <details class="raw">
-                        <summary>Raw JSON</summary>
-                        <pre class="json">@_json</pre>
-                    </details>
+                    <h2>JSON</h2>
+                    <pre class="json">@_json</pre>
                 </section>
             }
         </div>
@@ -113,9 +94,6 @@
     private bool _busy;
     private string? _error;
     private string? _json;
-    private JsonNode? _resultNode;
-    private JsonNode? _dataNode;
-    private string? _docType;
     private string? _previewDataUrl;
     private bool _isImage;
     private string _provider = "";
@@ -150,9 +128,6 @@
     {
         _error = null;
         _json = null;
-        _resultNode = null;
-        _dataNode = null;
-        _docType = null;
         _previewDataUrl = null;
         _isImage = false;
     }
@@ -194,18 +169,6 @@
             var structuredJson = llm.Json is null ? null : Masking.Unmask(llm.Json, mask.Map);
 
             _json = BuildJson(structuredJson, result);
-
-            // Parse for the formatted view; split documentType/data for nicer rendering.
-            try
-            {
-                _resultNode = JsonNode.Parse(_json);
-                if (_resultNode is JsonObject root)
-                {
-                    _docType = root.TryGetPropertyValue("documentType", out var dt) ? dt?.ToString() : null;
-                    _dataNode = root.TryGetPropertyValue("data", out var d) ? d : null;
-                }
-            }
-            catch { _resultNode = null; }
 
             // Toast: success when the AI model produced the result; warning when it failed and we fell back to OCR.
             if (llm.Error is not null)
