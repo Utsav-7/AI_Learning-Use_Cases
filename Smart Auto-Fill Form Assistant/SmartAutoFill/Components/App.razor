@@ -14,6 +14,21 @@
 <body>
     <Routes />
     <script src="_framework/blazor.web.js"></script>
+    <script>
+        // Image hover-zoom: follow the cursor by moving the transform-origin.
+        // Delegated on document so it keeps working across Blazor re-renders. Pure
+        // client-side — no SignalR round-trip per mouse move.
+        document.addEventListener('mousemove', function (e) {
+            const c = e.target.closest && e.target.closest('.zoom-container');
+            if (!c) return;
+            const img = c.querySelector('img');
+            if (!img) return;
+            const r = c.getBoundingClientRect();
+            const x = ((e.clientX - r.left) / r.width) * 100;
+            const y = ((e.clientY - r.top) / r.height) * 100;
+            img.style.transformOrigin = x + '% ' + y + '%';
+        });
+    </script>
 </body>
 
 </html>

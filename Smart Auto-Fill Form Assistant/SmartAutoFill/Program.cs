@@ -10,8 +10,9 @@ builder.Services.AddRazorComponents()
 // Document extraction (Azure Document Intelligence).
 builder.Services.AddScoped<IDocumentExtractionService, AzureDocumentExtractionService>();
 
-// PII masking.
+// PII masking + post-extraction validation.
 builder.Services.AddSingleton<IMaskingService, RegexMaskingService>();
+builder.Services.AddSingleton<IResultValidator, ResultValidator>();
 
 builder.Services.AddHttpClient("ollama", c =>
 {
@@ -27,7 +28,20 @@ builder.Services.AddHttpClient("gemini", c =>
 });
 
 // AI models (switchable at runtime via the UI selector).
-builder.Services.AddScoped<ILlmProvider, OllamaProvider>();
+// One selectable provider per Ollama model listed in config (Ollama:Models).
+var ollamaModels = builder.Configuration.GetSection("Ollama:Models").Get<List<OllamaModelOption>>() ?? new();
+if (ollamaModels.Count == 0)
+    ollamaModels.Add(new OllamaModelOption { Name = "Ollama", Model = "llama3.1:8b" });
+
+foreach (var m in ollamaModels)
+{
+    var opt = m; // capture
+    builder.Services.AddScoped<ILlmProvider>(sp => new OllamaProvider(
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetRequiredService<ILogger<OllamaProvider>>(),
+        opt.Name, opt.Model));
+}
+
 builder.Services.AddScoped<ILlmProvider, GeminiProvider>();
 builder.Services.AddScoped<ILlmProviderFactory, LlmProviderFactory>();
 

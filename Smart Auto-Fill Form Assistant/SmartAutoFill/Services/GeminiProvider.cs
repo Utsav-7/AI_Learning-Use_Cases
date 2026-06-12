@@ -46,7 +46,7 @@ public class GeminiProvider : ILlmProvider
                 }
             },
             contents = new[]
-            {
+              {
                 new { role = "user", parts = new[] { new { text = userPrompt } } }
             },
             generationConfig = new

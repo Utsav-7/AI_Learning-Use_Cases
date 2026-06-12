@@ -3,21 +3,22 @@ using System.Text.Json;
 
 namespace SmartAutoFill.Services;
 
-/// <summary>Local Ollama provider via the /api/chat endpoint (JSON mode).</summary>
+/// <summary>One Ollama model exposed as a selectable provider (a display name + an Ollama model id).</summary>
 public class OllamaProvider : ILlmProvider
 {
     private readonly HttpClient _http;
     private readonly string _chatModel;
     private readonly ILogger<OllamaProvider> _logger;
 
-    public string Name => "Ollama (local)";
+    public string Name { get; }
     public bool IsConfigured => true; // local; assumed available
 
-    public OllamaProvider(IHttpClientFactory factory, IConfiguration config, ILogger<OllamaProvider> logger)
+    public OllamaProvider(IHttpClientFactory factory, ILogger<OllamaProvider> logger, string name, string model)
     {
         _http = factory.CreateClient("ollama");
-        _chatModel = config["Ollama:ChatModel"] ?? "llama3.1:8b";
         _logger = logger;
+        Name = name;
+        _chatModel = model;
     }
 
     public async Task<LlmResult> ClassifyAndExtractAsync(string maskedText, string instruction, CancellationToken ct = default)

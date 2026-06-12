@@ -6,6 +6,8 @@
 @inject IDocumentExtractionService Extractor
 @inject IMaskingService Masking
 @inject ILlmProviderFactory LlmProviders
+@inject IResultValidator Validator
+@inject IJSRuntime JS
 @inject ILogger<Home> Logger
 
 <PageTitle>Smart Auto-Fill Form Assistant</PageTitle>
@@ -21,6 +23,15 @@
         <div class="toast toast-@_toast.Kind">
             <span>@_toast.Message</span>
             <button class="toast-close" @onclick="() => _toast = null">×</button>
+        </div>
+    }
+
+    @if (_busy)
+    {
+        <div class="loading-overlay">
+            <div class="spinner"></div>
+            <div class="loading-text">Processing with @_provider…</div>
+            <div class="loading-sub">Extracting text and analysing the document — this can take a moment.</div>
         </div>
     }
 
@@ -60,26 +71,58 @@
         <div class="result-grid">
             @if (!string.IsNullOrEmpty(_previewDataUrl))
             {
-                <section class="card">
+                <section class="card preview-card">
                     <h2>Uploaded Document</h2>
-                    <div class="preview">
-                        @if (_isImage)
-                        {
+                    @if (_isImage)
+                    {
+                        <div class="zoom-container" title="Hover to zoom">
                             <img src="@_previewDataUrl" alt="Uploaded document" />
-                        }
-                        else
-                        {
-                            <iframe src="@_previewDataUrl" title="Uploaded document"></iframe>
-                        }
-                    </div>
+                        </div>
+                        <p class="hint">
+                            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                            </svg>
+                            Hover over the image to zoom.
+                        </p>
+                    }
+                    else
+                    {
+                        <div class="preview">
+                            <iframe class="pdf-frame" src="@_previewDataUrl" title="Uploaded document"></iframe>
+                        </div>
+                    }
                 </section>
             }
 
             @if (!string.IsNullOrEmpty(_json))
             {
-                <section class="card">
-                    <h2>JSON</h2>
-                    <pre class="json">@_json</pre>
+                <section class="card json-card">
+                    <div class="json-toolbar">
+                        <h2>JSON</h2>
+                        <button class="btn-ghost" @onclick="CopyJson">@_copyLabel</button>
+                    </div>
+
+                    @if (_issues.Count > 0)
+                    {
+                        <div class="review">
+                            <div class="review-title">
+                                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 3 L22 20 H2 Z" /><line x1="12" y1="10" x2="12" y2="14" /><circle cx="12" cy="17.5" r=".6" fill="currentColor" />
+                                </svg>
+                                @_issues.Count field(s) need review
+                            </div>
+                            <ul>
+                                @foreach (var issue in _issues)
+                                {
+                                    <li class="review-@issue.Severity">
+                                        <strong>@issue.Field</strong> — @issue.Message
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    }
+
+                    <pre class="json">@HighlightJson(_json)</pre>
                 </section>
             }
         </div>
@@ -94,10 +137,12 @@
     private bool _busy;
     private string? _error;
     private string? _json;
+    private IReadOnlyList<FieldIssue> _issues = Array.Empty<FieldIssue>();
     private string? _previewDataUrl;
     private bool _isImage;
     private string _provider = "";
     private Toast? _toast;
+    private string _copyLabel = "Copy";
 
     private const long MaxBytes = 20 * 1024 * 1024; // 20 MB
 
@@ -117,17 +162,50 @@
         });
     }
 
+    private static readonly string[] AllowedExtensions =
+        { ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp" };
+
     private void OnFileSelected(InputFileChangeEventArgs e)
     {
         ResetState();
         _toast = null;
-        _file = e.File;
+
+        var file = e.File;
+        var ext = Path.GetExtension(file.Name).ToLowerInvariant();
+        if (!AllowedExtensions.Contains(ext))
+        {
+            _file = null;
+            ShowToast($"Unsupported file type \"{ext}\". Please upload a PDF or image (PNG, JPG, TIFF, BMP).", "error");
+            return;
+        }
+        if (file.Size <= 0)
+        {
+            _file = null;
+            ShowToast("The selected file is empty (0 bytes).", "error");
+            return;
+        }
+
+        _file = file;
+    }
+
+    /// <summary>Verify the bytes actually match a PDF/image signature (catches renamed files).</summary>
+    private static bool IsAllowedContent(byte[] b)
+    {
+        if (b.Length < 4) return false;
+        bool Starts(params byte[] sig) => b.Length >= sig.Length && b.Take(sig.Length).SequenceEqual(sig);
+        return Starts(0x25, 0x50, 0x44, 0x46)        // %PDF
+            || Starts(0x89, 0x50, 0x4E, 0x47)        // PNG
+            || Starts(0xFF, 0xD8, 0xFF)              // JPEG
+            || Starts(0x42, 0x4D)                    // BMP
+            || Starts(0x49, 0x49, 0x2A, 0x00)        // TIFF (little-endian)
+            || Starts(0x4D, 0x4D, 0x00, 0x2A);       // TIFF (big-endian)
     }
 
     private void ResetState()
     {
         _error = null;
         _json = null;
+        _issues = Array.Empty<FieldIssue>();
         _previewDataUrl = null;
         _isImage = false;
     }
@@ -137,6 +215,7 @@
         if (_file is null) return;
         _busy = true;
         ResetState();
+        await Task.Yield(); // let the loading overlay render before the heavy work
 
         try
         {
@@ -147,6 +226,18 @@
             {
                 await stream.CopyToAsync(ms);
                 bytes = ms.ToArray();
+            }
+
+            // Validate: non-empty and a real PDF/image (guards against renamed/corrupt files).
+            if (bytes.Length == 0)
+            {
+                ShowToast("The file is empty — nothing to process.", "error");
+                return;
+            }
+            if (!IsAllowedContent(bytes))
+            {
+                ShowToast("This file isn't a valid PDF or image. Please upload a genuine PDF/PNG/JPG/TIFF/BMP.", "error");
+                return;
             }
 
             // Document preview (image inline, PDF in an iframe).
@@ -170,9 +261,14 @@
 
             _json = BuildJson(structuredJson, result);
 
-            // Toast: success when the AI model produced the result; warning when it failed and we fell back to OCR.
+            // Validate the extracted data (formats, cross-field, low confidence).
+            _issues = Validator.Validate(_json, result.RawText);
+
+            // Toast: warning if the model failed (OCR fallback) or some fields need review; else success.
             if (llm.Error is not null)
                 ShowToast($"{provider.Name}: {llm.Error} Showing OCR fallback.", "warning");
+            else if (_issues.Count > 0)
+                ShowToast($"Extracted with {provider.Name}. {_issues.Count} field(s) need review.", "warning");
             else
                 ShowToast($"Extracted successfully with {provider.Name}.", "success");
         }
@@ -289,4 +385,48 @@
             ".bmp" => "image/bmp",
             _ => "application/octet-stream"
         };
+
+    private async Task CopyJson()
+    {
+        if (string.IsNullOrEmpty(_json)) return;
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", _json);
+            _copyLabel = "Copied";
+            StateHasChanged();
+            await Task.Delay(1500);
+            _copyLabel = "Copy";
+            StateHasChanged();
+        }
+        catch (Exception ex) { Logger.LogWarning(ex, "Clipboard copy failed"); }
+    }
+
+    private static readonly Regex JsonToken = new(
+        "\"(?:\\\\.|[^\"\\\\])*\"(?:\\s*:)?|\\b(?:true|false|null)\\b|-?\\d+(?:\\.\\d+)?(?:[eE][+\\-]?\\d+)?",
+        RegexOptions.Compiled);
+
+    /// <summary>Lightweight JSON syntax highlighting → colored spans.</summary>
+    private static MarkupString HighlightJson(string json)
+    {
+        var sb = new System.Text.StringBuilder();
+        var last = 0;
+        foreach (Match m in JsonToken.Matches(json))
+        {
+            sb.Append(Enc(json.Substring(last, m.Index - last)));
+            var tok = m.Value;
+            string cls;
+            if (tok.StartsWith("\""))
+                cls = tok.TrimEnd().EndsWith(":") ? "j-key" : "j-str";
+            else if (tok is "true" or "false" or "null")
+                cls = "j-kw";
+            else
+                cls = "j-num";
+            sb.Append($"<span class=\"{cls}\">{Enc(tok)}</span>");
+            last = m.Index + m.Length;
+        }
+        sb.Append(Enc(json[last..]));
+        return (MarkupString)sb.ToString();
+
+        static string Enc(string s) => System.Net.WebUtility.HtmlEncode(s);
+    }
 }
